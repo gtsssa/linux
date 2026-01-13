@@ -6,67 +6,41 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Install dependencies
+    - name: Setup desktop
       run: |
+        # 安装桌面和终端
         sudo apt update
-        sudo apt install -y xfce4 x11vnc novnc net-tools
+        sudo apt install -y \
+          xfce4 \
+          x11vnc \
+          novnc \
+          xterm \
+          lxterminal \
+          firefox
         
-    - name: Start desktop with plain password
-      run: |
-        # 清理可能存在的进程
-        pkill -f "Xvfb" 2>/dev/null || true
-        pkill -f "x11vnc" 2>/dev/null || true
-        
-        # 启动虚拟显示
-        Xvfb :99 -screen 0 1024x768x24 -ac &
+        # 启动
+        Xvfb :99 -screen 0 1024x768x24 &
         export DISPLAY=:99
         sleep 3
         
-        # 启动XFCE
         startxfce4 &
-        sleep 8
+        sleep 10
         
-        # 启动VNC（使用明文密码，确保正确）
-        x11vnc -display :99 -forever -shared -rfbport 5900 -passwd asdf1234 -bg -noxdamage
+        x11vnc -display :99 -forever -passwd asdf1234 -bg
         
-        # 等待VNC启动
-        sleep 3
-        
-        # 启动noVNC
         /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
         
-        echo "服务启动完成，等待15秒..."
-        sleep 15
+        echo "桌面已启动，终端已安装"
         
-        # 验证服务
-        echo "检查进程:"
-        ps aux | grep -E "(x11vnc|novnc|Xvfb)" | grep -v grep
-        
-        echo "检查端口:"
-        netstat -tlnp 2>/dev/null | grep -E "(5900|6080)"
-        
-    - name: Setup cloudflared tunnel
+    - name: Create tunnel
       run: |
         wget -q https://github.com/cloudflare/cloudflared/releases/download/2025.11.1/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
-        
-        # 启动隧道
         ./cloudflared-linux-amd64 tunnel --url http://localhost:6080 2>&1 | tee tunnel.log &
-        sleep 35
         
-        echo "隧道日志:"
-        grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log || echo "URL未找到，查看完整日志"
-        
-    - name: Display info and keep running
+    - name: Wait and show URL
       run: |
-        echo "========================================"
-        echo "         🖥️  桌面访问信息"
-        echo "========================================"
-        echo ""
-        echo "🔑 密码: asdf1234"
-        echo ""
-        echo "⏳ 等待隧道URL生成..."
-        echo ""
-        
-        # 显示实时隧道日志
-        timeout 355m tail -f tunnel.log
+        sleep 30
+        echo "终端快捷键: Ctrl+Alt+T"
+        echo "密码: asdf1234"
+        timeout 350m tail -f tunnel.log
