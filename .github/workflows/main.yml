@@ -1,4 +1,4 @@
-name: Linux
+name: Linux Desktop
 on: 
   workflow_dispatch:
 defaults:
@@ -15,7 +15,7 @@ jobs:
 
     - name: Setup Ubuntu Desktop with NoVNC
       run: |
-        # 安装必要的依赖（包含vncpasswd）
+        # 安装必要的依赖
         sudo apt-get update
         sudo apt-get install -y \
           xfce4 \
@@ -29,112 +29,31 @@ jobs:
           wget \
           gnome-terminal \
           net-tools \
-          dbus-x11 \
-          tightvncserver  # 这个包包含vncpasswd命令
+          dbus-x11
         
-        # 方法1：尝试使用vncpasswd命令
-        echo "尝试方法1：使用vncpasswd..."
+        # 创建VNC密码文件 - 使用x11vnc的非交互方法
         mkdir -p ~/.vnc
-        if command -v vncpasswd &> /dev/null; then
-          echo "使用vncpasswd命令"
-          echo "asdf1234" | vncpasswd -f > ~/.vnc/passwd
-        else
-          echo "vncpasswd命令未找到，使用方法2：Python生成密码"
-          # 方法2：使用Python生成x11vnc密码文件
-          python3 << 'EOF'
-import os
-import struct
-
-password = "asdf1234"
-# x11vnc密码格式：密码字节+空字节填充到8字节
-passwd_bytes = b''
-for char in password:
-    passwd_bytes += char.encode('utf-8')
-    passwd_bytes += b'\x00'
-# 填充到8字节
-passwd_bytes = passwd_bytes.ljust(8, b'\x00')
-
-with open(os.path.expanduser('~/.vnc/passwd'), 'wb') as f:
-    f.write(passwd_bytes)
-print("密码文件已创建")
-EOF
-        fi
-        
+        # 创建一个脚本来自动回答y
+        printf 'y\n' | x11vnc -storepasswd asdf1234 ~/.vnc/passwd
         chmod 600 ~/.vnc/passwd
-        
-        # 方法3：备用方案 - 使用x11vnc的-storepasswd选项
-        echo "方法3：使用x11vnc-storepasswd创建密码文件..."
-        x11vnc -storepasswd asdf1234 ~/.vnc/passwd2 <<EOF
-y
-EOF
-        if [ -f ~/.vnc/passwd2 ]; then
-          mv ~/.vnc/passwd2 ~/.vnc/passwd
-          echo "使用x11vnc-storepasswd创建的密码文件"
-        fi
-        
-        # 验证密码文件
-        if [ -f ~/.vnc/passwd ]; then
-          echo "密码文件创建成功，大小: $(wc -c < ~/.vnc/passwd) 字节"
-        else
-          echo "警告：未能创建密码文件"
-          # 创建空密码文件（不安全，仅测试用）
-          echo "创建空密码文件..."
-          echo -n "" > ~/.vnc/passwd
-        fi
         
         # 配置XFCE桌面环境
         echo "export DISPLAY=:1" >> ~/.bashrc
         echo "export LANG=en_US.UTF-8" >> ~/.bashrc
         echo "export LANGUAGE=en_US:en" >> ~/.bashrc
         
-        # 设置自动启动XFCE的脚本（改进版）
+        # 设置自动启动脚本
         cat > ~/start_desktop.sh << 'EOF'
-#!/bin/bash
-# 设置显示
-export DISPLAY=:1
-
-# 清理可能存在的旧进程
-pkill -f "Xvfb :1" 2>/dev/null || true
-pkill -f "xfce4" 2>/dev/null || true
-pkill -f "x11vnc" 2>/dev/null || true
-pkill -f "novnc" 2>/dev/null || true
-
-# 启动虚拟帧缓冲
-echo "启动Xvfb..."
-Xvfb :1 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
-XVFB_PID=$!
-sleep 3
-
-# 启动XFCE桌面
-echo "启动XFCE..."
-startxfce4 > /dev/null 2>&1 &
-XFCE_PID=$!
-sleep 5
-
-# 启动VNC服务器
-echo "启动VNC服务器..."
-if [ -f ~/.vnc/passwd ]; then
-    echo "使用密码文件"
-    x11vnc -display :1 -forever -shared -rfbport 5900 -passwdfile ~/.vnc/passwd -bg -noxdamage
-else
-    echo "使用明文密码"
-    x11vnc -display :1 -forever -shared -rfbport 5900 -passwd asdf1234 -bg -noxdamage
-fi
-sleep 2
-
-# 启动noVNC
-echo "启动noVNC..."
-websockify --web /usr/share/novnc/ 6080 localhost:5900 > /dev/null 2>&1 &
-NOVNC_PID=$!
-
-echo "所有服务已启动"
-echo "VNC端口: 5900"
-echo "noVNC端口: 6080"
-echo "密码: asdf1234"
-
-# 等待进程
-wait $NOVNC_PID
-EOF
+        #!/bin/bash
+        export DISPLAY=:1
+        Xvfb :1 -screen 0 1280x720x24 &
+        sleep 2
+        startxfce4 &
+        sleep 5
+        x11vnc -display :1 -forever -shared -rfbport 5900 -passwdfile ~/.vnc/passwd &
+        sleep 2
+        websockify --web /usr/share/novnc/ 6080 localhost:5900 &
+        EOF
         
         chmod +x ~/start_desktop.sh
 
@@ -144,133 +63,35 @@ EOF
         wget -q https://github.com/cloudflare/cloudflared/releases/download/2025.11.1/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
-        
-        # 测试cloudflared
-        cloudflared --version
 
     - name: Start NoVNC and Cloudflared
       run: |
         # 启动桌面环境
-        echo "启动桌面环境..."
-        bash ~/start_desktop.sh > ~/desktop.log 2>&1 &
-        DESKTOP_PID=$!
+        bash ~/start_desktop.sh &
         
         # 等待服务启动
-        echo "等待服务启动..."
-        for i in {1..10}; do
-          if netstat -tln 2>/dev/null | grep -q ":6080"; then
-            echo "noVNC已启动"
-            break
-          fi
-          echo "等待中... ($i/10)"
-          sleep 3
-        done
-        
-        # 检查服务状态
-        echo "检查服务状态:"
-        echo "进程状态:"
-        ps aux | grep -E '(Xvfb|xfce4|x11vnc|websockify)' | grep -v grep || echo "无相关进程"
-        echo ""
-        echo "端口监听:"
-        netstat -tln 2>/dev/null | grep -E '(5900|6080)' || echo "端口未监听"
-        echo ""
-        echo "桌面日志片段:"
-        tail -10 ~/desktop.log
+        sleep 15
         
         # 启动cloudflared隧道
-        echo "启动cloudflared隧道..."
-        cloudflared tunnel --url http://localhost:6080 > ~/tunnel.log 2>&1 &
-        TUNNEL_PID=$!
+        echo "正在启动cloudflared隧道..."
+        cloudflared tunnel --url http://localhost:6080 2>&1 | tee cloudflared.log &
         
         # 等待隧道建立
-        echo "等待隧道建立..."
         sleep 20
         
         # 从日志中提取访问URL
-        if grep -q "trycloudflare.com" ~/tunnel.log; then
-          echo "隧道已建立！"
-          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ~/tunnel.log | head -1)
+        if grep -q "trycloudflare.com" cloudflared.log; then
+          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' cloudflared.log | head -1)
           echo "访问地址: $TUNNEL_URL"
           echo "VNC密码: asdf1234"
-          
-          # 将URL设置为GitHub Actions输出
           echo "NOVNC_URL=$TUNNEL_URL" >> $GITHUB_ENV
-          echo "::notice title=访问信息::桌面已启动！访问地址: $TUNNEL_URL VNC密码: asdf1234"
-          
-          # 保存URL到文件
-          echo "$TUNNEL_URL" > ~/tunnel_url.txt
-        else
-          echo "警告: 无法从日志中提取隧道URL"
-          echo "隧道日志内容:"
-          tail -20 ~/tunnel.log
-          
-          # 尝试其他方式获取URL
-          echo "尝试其他方式获取URL..."
-          sleep 10
-          if grep -q "trycloudflare.com" ~/tunnel.log; then
-            TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ~/tunnel.log | head -1)
-            echo "找到URL: $TUNNEL_URL"
-            echo "NOVNC_URL=$TUNNEL_URL" >> $GITHUB_ENV
-          fi
         fi
 
-    - name: Keep alive with monitoring
+    - name: Keep alive
       run: |
-        echo "========================================"
-        echo "Ubuntu Desktop 环境信息"
-        echo "========================================"
+        echo "桌面运行中..."
+        echo "URL: ${{ env.NOVNC_URL || '等待URL生成...' }}"
+        echo "密码: asdf1234"
         
-        # 显示访问信息
-        if [ -f ~/tunnel_url.txt ]; then
-          TUNNEL_URL=$(cat ~/tunnel_url.txt)
-          echo "✅ 访问地址: $TUNNEL_URL"
-        elif [ -n "${{ env.NOVNC_URL }}" ]; then
-          echo "✅ 访问地址: ${{ env.NOVNC_URL }}"
-        else
-          echo "⚠️  隧道URL未找到"
-          echo "本地访问: http://localhost:6080"
-        fi
-        
-        echo "🔑 VNC密码: asdf1234"
-        echo ""
-        echo "📊 监控信息:"
-        
-        # 监控循环
-        COUNTER=0
-        while [ $COUNTER -lt 360 ]; do  # 最多6小时
-          echo ""
-          echo "[$(date '+%H:%M:%S')] 运行状态:"
-          
-          # 检查进程
-          echo "进程状态:"
-          ps aux | grep -E '(Xvfb|xfce4|x11vnc|websockify|cloudflared)' | grep -v grep | head -5 || echo "  无"
-          
-          # 检查端口
-          echo "端口监听:"
-          netstat -tln 2>/dev/null | grep -E '(5900|6080)' || echo "  无"
-          
-          # 检查隧道日志
-          if [ -f ~/tunnel.log ] && tail -1 ~/tunnel.log | grep -q "trycloudflare.com"; then
-            echo "隧道状态: ✅ 正常"
-          elif [ -f ~/tunnel.log ]; then
-            echo "隧道状态: ⚠️  运行中"
-          else
-            echo "隧道状态: ❌ 未运行"
-          fi
-          
-          let COUNTER=COUNTER+1
-          sleep 60
-        done
-        
-        echo "工作时间结束（6小时）"
-
-    - name: Cleanup
-      if: always()
-      run: |
-        echo "清理进程..."
-        pkill -f "Xvfb" 2>/dev/null || true
-        pkill -f "xfce4" 2>/dev/null || true
-        pkill -f "x11vnc" 2>/dev/null || true
-        pkill -f "websockify" 2>/dev/null || true
-        pkill -f "cloudflared" 2>/dev/null || true
-        echo "清理完成"
+        # 保持工作流运行
+        timeout 6h bash -c 'while true; do sleep 300; done'
