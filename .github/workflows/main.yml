@@ -15,9 +15,9 @@ jobs:
 
     - name: Setup Ubuntu Desktop with NoVNC
       run: |
-        # 安装必要的依赖
+        # 安装必要的依赖（包含tightvncserver）
         sudo apt-get update
-        sudo apt-get install -y \
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
           xfce4 \
           xfce4-goodies \
           x11vnc \
@@ -29,88 +29,200 @@ jobs:
           wget \
           gnome-terminal \
           net-tools \
-          dbus-x11
+          dbus-x11 \
+          tightvncserver \
+          xvfb \
+          xserver-xorg-video-dummy \
+          x11-xserver-utils \
+          xfonts-base \
+          xauth
         
-        # 创建VNC密码文件
+        # 创建VNC密码文件（使用替代方法）
         mkdir -p ~/.vnc
-        echo "asdf1234" | vncpasswd -f > ~/.vnc/passwd
+        
+        # 方法1：使用Python生成密码文件
+        python3 -c "
+import base64
+import struct
+
+password = 'asdf1234'
+passwd = b''
+for c in password:
+    passwd += c.encode('utf-8')
+    passwd += b'\x00\x00'
+key = passwd.ljust(8, b'\x00')
+
+with open('/home/runner/.vnc/passwd', 'wb') as f:
+    f.write(key)
+"
+        
+        # 或者方法2：使用openssl（更简单）
+        echo -n "asdf1234" | openssl passwd -stdin > /tmp/passwd_tmp
+        mv /tmp/passwd_tmp ~/.vnc/passwd
+        
         chmod 600 ~/.vnc/passwd
         
-        # 配置XFCE桌面环境
+        # 配置环境变量
         echo "export DISPLAY=:1" >> ~/.bashrc
         echo "export LANG=en_US.UTF-8" >> ~/.bashrc
         echo "export LANGUAGE=en_US:en" >> ~/.bashrc
+        source ~/.bashrc
         
-        # 设置自动启动XFCE的脚本
+        # 设置自动启动脚本（简化版）
         cat > ~/start_desktop.sh << 'EOF'
-        #!/bin/bash
-        export DISPLAY=:1
-        Xvfb :1 -screen 0 1280x720x24 &
-        sleep 2
-        startxfce4 &
-        sleep 5
-        x11vnc -display :1 -noxdamage -forever -shared -rfbport 5900 -passwd asdf1234 &
-        sleep 2
-        /usr/share/novnc/utils/launch.sh --vnc localhost:5900 --listen 6080 &
-        EOF
+#!/bin/bash
+
+# 设置显示
+export DISPLAY=:1
+export XAUTHORITY=$HOME/.Xauthority
+
+# 启动虚拟显示
+Xvfb :1 -screen 0 1280x720x24 -ac +extension GLX +render -noreset &
+XVFB_PID=$!
+sleep 3
+
+# 设置xauth
+xauth add :1 . $(mcookie)
+
+# 启动XFCE桌面
+startxfce4 &
+sleep 5
+
+# 启动VNC服务器（使用x11vnc）
+x11vnc -display :1 -noxdamage -forever -shared -rfbport 5900 -passwd asdf1234 -bg
+sleep 2
+
+# 启动noVNC
+/usr/share/novnc/utils/launch.sh --vnc localhost:5900 --listen 6080 --web /usr/share/novnc/ &
+NOVNC_PID=$!
+
+echo "桌面环境已启动"
+echo "VNC端口: 5900"
+echo "noVNC端口: 6080"
+echo "密码: asdf1234"
+
+# 保持脚本运行
+wait $NOVNC_PID
+EOF
         
         chmod +x ~/start_desktop.sh
 
     - name: Download and setup Cloudflared
       run: |
         # 下载cloudflared
-        wget https://github.com/cloudflare/cloudflared/releases/download/2025.11.1/cloudflared-linux-amd64
+        wget -q https://github.com/cloudflare/cloudflared/releases/download/2025.11.1/cloudflared-linux-amd64
         chmod +x cloudflared-linux-amd64
         sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
         
-        # 创建cloudflared配置文件
-        mkdir -p ~/.cloudflared
-        cat > ~/.cloudflared/config.yml << 'EOF'
-        tunnel: $(echo ${GITHUB_REPOSITORY##*/}-${GITHUB_RUN_ID} | tr '/' '-')
-        credentials-file: /home/runner/.cloudflared/credentials.json
-        ingress:
-          - hostname: $(echo ${GITHUB_REPOSITORY##*/}-${GITHUB_RUN_ID} | tr '/' '-').trycloudflare.com
-            service: http://localhost:6080
-          - service: http_status:404
-        EOF
+        # 测试cloudflared
+        cloudflared --version
 
-    - name: Start NoVNC and Cloudflared
+    - name: Start Desktop Environment
       run: |
-        # 启动桌面环境
-        bash ~/start_desktop.sh &
+        # 启动桌面环境（后台运行）
+        bash ~/start_desktop.sh > ~/desktop.log 2>&1 &
+        DESKTOP_PID=$!
         
-        # 等待NoVNC启动
-        sleep 10
+        echo "等待桌面环境启动..."
+        sleep 20
         
-        # 启动cloudflared隧道
-        echo "正在启动cloudflared隧道..."
-        cloudflared tunnel --url http://localhost:6080 2>&1 | tee cloudflared.log &
+        # 检查服务是否运行
+        echo "检查进程:"
+        ps aux | grep -E '(Xvfb|x11vnc|novnc)' | grep -v grep || echo "未找到相关进程"
         
-        # 等待隧道建立
-        sleep 15
+        echo "检查端口:"
+        netstat -tlnp | grep -E '(5900|6080)' || echo "端口未监听"
         
-        # 从日志中提取访问URL
-        if grep -q "trycloudflare.com" cloudflared.log; then
+        # 检查日志
+        echo "桌面日志片段:"
+        tail -20 ~/desktop.log || echo "无日志"
+
+    - name: Start Cloudflared Tunnel
+      run: |
+        echo "启动Cloudflared隧道..."
+        
+        # 简单启动cloudflared隧道
+        cloudflared tunnel --url http://localhost:6080 > ~/tunnel.log 2>&1 &
+        TUNNEL_PID=$!
+        
+        echo "等待隧道建立..."
+        sleep 25
+        
+        # 检查隧道日志
+        echo "隧道日志:"
+        cat ~/tunnel.log
+        
+        # 尝试提取URL
+        echo "尝试提取访问URL..."
+        if grep -q "trycloudflare.com" ~/tunnel.log; then
+          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ~/tunnel.log | head -1)
           echo "隧道已建立！"
-          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' cloudflared.log | head -1)
           echo "访问地址: $TUNNEL_URL"
           echo "VNC密码: asdf1234"
-          
-          # 将URL设置为GitHub Actions输出
           echo "NOVNC_URL=$TUNNEL_URL" >> $GITHUB_ENV
           echo "::notice title=访问信息::桌面已启动！访问地址: $TUNNEL_URL VNC密码: asdf1234"
         else
-          echo "警告: 无法从日志中提取隧道URL"
-          echo "请检查cloudflared.log文件查看详细信息"
+          echo "等待隧道URL生成..."
+          # 再次等待并检查
+          sleep 10
+          if grep -q "trycloudflare.com" ~/tunnel.log; then
+            TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' ~/tunnel.log | head -1)
+            echo "隧道URL: $TUNNEL_URL"
+            echo "NOVNC_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          else
+            echo "未找到隧道URL，请检查日志"
+            echo "可能的原因:"
+            echo "1. 桌面环境未正确启动"
+            echo "2. Cloudflared连接问题"
+            echo "3. 端口未监听"
+          fi
         fi
 
-    - name: Keep alive
+    - name: Keep alive and display info
       run: |
-        echo "桌面环境正在运行中..."
-        echo "按 Ctrl+C 停止工作流"
-        echo "访问信息:"
-        echo "URL: ${{ env.NOVNC_URL }}"
-        echo "密码: asdf1234"
+        echo "=========================================="
+        echo "     Ubuntu Desktop 环境信息"
+        echo "=========================================="
+        echo ""
         
-        # 保持工作流运行（最多6小时）
-        timeout 6h bash -c 'while true; do sleep 300; done'
+        if [ -n "${{ env.NOVNC_URL }}" ]; then
+          echo "✅ 访问地址: ${{ env.NOVNC_URL }}"
+        else
+          echo "⚠️  未能获取隧道URL，尝试手动检查:"
+          echo "   1. 查看隧道日志: cat ~/tunnel.log"
+          echo "   2. 查看桌面日志: cat ~/desktop.log"
+          echo "   3. 检查本地端口:"
+          echo "      - noVNC: http://localhost:6080"
+          echo "      - VNC: localhost:5900"
+        fi
+        
+        echo ""
+        echo "🔑 VNC密码: asdf1234"
+        echo ""
+        echo "📊 当前进程状态:"
+        ps aux | grep -E '(Xvfb|x11vnc|novnc|cloudflared)' | grep -v grep || echo "无相关进程"
+        echo ""
+        echo "🔌 端口监听状态:"
+        netstat -tlnp | grep -E '(5900|6080)' || echo "无端口监听"
+        echo ""
+        echo "=========================================="
+        echo "工作流将保持运行，最长6小时"
+        echo "按Ctrl+C或取消工作流以停止"
+        echo "=========================================="
+        
+        # 保持运行（显示实时日志）
+        echo "显示实时隧道日志:"
+        tail -f ~/tunnel.log &
+        TAIL_PID=$!
+        
+        # 超时设置（6小时）
+        timeout 6h bash -c '
+        echo "工作流运行中..."
+        while true; do
+          sleep 60
+          echo "$(date): 工作流仍在运行"
+        done
+        '
+        
+        # 清理
+        kill $TAIL_PID 2>/dev/null || true
