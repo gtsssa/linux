@@ -1,10 +1,9 @@
-name: Deploy Ubuntu Desktop with NoVNC
-
-on:
-  workflow_dispatch:  # 手动触发
-  # 如果需要定时触发，可以取消下面的注释
-  # schedule:
-  #   - cron: '0 */6 * * *'  # 每6小时运行一次
+name: MacOS VM
+on: 
+  workflow_dispatch:
+defaults:
+  run:
+    shell: bash
 
 jobs:
   deploy:
