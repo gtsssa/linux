@@ -1,9 +1,5 @@
-name: Linux
-on: 
-  workflow_dispatch:
-defaults:
-  run:
-    shell: bash
+name: CI
+on: [push, workflow_dispatch]
 
 jobs:
   deploy:
